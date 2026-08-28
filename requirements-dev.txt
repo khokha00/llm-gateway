@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==8.3.3
+pytest-asyncio==0.24.0
+locust==2.31.5
+respx==0.21.1
+fakeredis==2.24.1

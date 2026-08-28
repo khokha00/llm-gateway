@@ -1,0 +1,71 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gateway
+    ports: ["8000:8000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - VLLM_URL=http://vllm:8001
+      # - VLLM_URL_B=http://vllm-b:8002   # uncomment once the 2nd backend is added
+      - PRIMARY_MODEL_ID=${PRIMARY_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct-AWQ}
+      - RATE_LIMIT_PER_MIN=60
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    networks: [gateway-net]
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks: [gateway-net]
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model ${PRIMARY_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct-AWQ}
+      --quantization awq
+      --gpu-memory-utilization 0.9
+      --max-model-len 8192
+      --port 8001
+    ports: ["8001:8001"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks: [gateway-net]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports: ["9090:9090"]
+    networks: [gateway-net]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks: [gateway-net]
+
+networks:
+  gateway-net:
+
+volumes:
+  hf-cache:
+  prom-data:
+  grafana-data:
