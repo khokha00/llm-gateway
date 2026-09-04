@@ -4,6 +4,7 @@ no vLLM, no GPU, no network. This is exactly what CI runs on every push.
 """
 import fakeredis.aioredis
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.adapters.base import ModelBackend
@@ -35,7 +36,7 @@ class FakeBackend(ModelBackend):
         return True
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client():
     app.state.backends = {"test-model": FakeBackend()}
     app.state.fallback_backends = {}
