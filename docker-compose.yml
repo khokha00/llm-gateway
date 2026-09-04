@@ -7,13 +7,16 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
+      ollama-b:
+        condition: service_healthy
     environment:
       - REDIS_URL=redis://redis:6379
-      - VLLM_URL=http://vllm:8001
-      # - VLLM_URL_B=http://vllm-b:8002   # uncomment once the 2nd backend is added
-      - PRIMARY_MODEL_ID=${PRIMARY_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct-AWQ}
-      - RATE_LIMIT_PER_MIN=60
-      - LOG_LEVEL=INFO
+      - VLLM_URL=http://ollama:11434
+      - VLLM_URL_B=http://ollama-b:11434
+      - PRIMARY_MODEL_ID=${PRIMARY_MODEL_ID:-qwen2.5:1.5b}
+      - SECONDARY_MODEL_ID=${SECONDARY_MODEL_ID:-qwen2.5:1.5b}
     restart: unless-stopped
     networks: [gateway-net]
 
@@ -27,24 +30,37 @@ services:
     restart: unless-stopped
     networks: [gateway-net]
 
-  vllm:
-    image: vllm/vllm-openai:latest
-    command: >
-      --model ${PRIMARY_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct-AWQ}
-      --quantization awq
-      --gpu-memory-utilization 0.9
-      --max-model-len 8192
-      --port 8001
-    ports: ["8001:8001"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: ["gpu"]
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
     volumes:
-      - hf-cache:/root/.cache/huggingface
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
     networks: [gateway-net]
-
+    # NOTE: no GPU reservation block -- runs on CPU.
+    # If you later rent a GPU box, swap this service back to:
+    #   image: vllm/vllm-openai:latest
+    #   command: --model ... --quantization awq ...
+    #   deploy: { resources: { reservations: { devices: [{capabilities: ["gpu"]}] } } }
+  ollama-b:
+    image: ollama/ollama:latest
+    ports: ["11435:11434"]
+    volumes:
+      - ollama-b-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks: [gateway-net]
   prometheus:
     image: prom/prometheus:latest
     volumes:
@@ -60,12 +76,16 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboard-files:ro
     networks: [gateway-net]
 
 networks:
   gateway-net:
 
 volumes:
-  hf-cache:
+  ollama-data:
+  ollama-b-data:
   prom-data:
   grafana-data:
