@@ -1,95 +1,87 @@
 # LLM Gateway
 
-Open-source, OpenAI-compatible inference proxy. Multi-backend (vLLM), Redis-cached,
-streaming, containerized, observable (Prometheus/Grafana), and deployed via GitHub Actions.
+An open-source, OpenAI-compatible inference proxy: multi-backend, Redis-cached,
+streaming, containerized, observable, and deployed through CI/CD.
 
-## Local dev (no Docker)
+Point any OpenAI-compatible client (`openai-python`, LangChain, etc.) at this
+gateway's `base_url` and it works — same request/response schema as OpenAI's
+`/v1/chat/completions`.
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
+## Features
 
-# terminal 1 -- serve a model with vLLM (needs a GPU)
-pip install vllm
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-7B-Instruct-AWQ \
-  --quantization awq \
-  --gpu-memory-utilization 0.9 \
-  --max-model-len 8192 \
-  --port 8001
+- **OpenAI-compatible API** — `/v1/chat/completions`, streaming and non-streaming
+- **Pluggable backends** — talks to any OpenAI-compatible model server (vLLM,
+  Ollama, TGI, etc.) through a common adapter interface
+- **Exact-match caching** — Redis-backed, deterministic (`temperature=0`)
+  requests only
+- **Automatic fallback** — retries the primary backend once, then fails over
+  to a secondary backend rather than erroring out
+- **Rate limiting** — per-API-key, Redis token-bucket style, with usage
+  tracking (`/usage/{api_key}`)
+- **Observability** — Prometheus metrics (`/metrics`) + an auto-provisioned
+  Grafana dashboard (latency percentiles, throughput, cache hit ratio, error
+  rate, fallback rate, rate-limit rejections)
+- **CI/CD** — GitHub Actions: test (mocked backend, no GPU) → build & push to
+  GHCR → deploy → smoke test
 
-# terminal 2 -- redis
-docker run -p 6379:6379 redis:7-alpine
+## Stack
 
-# terminal 3 -- gateway
-export REDIS_URL=redis://localhost:6379
-export VLLM_URL=http://localhost:8001
-export PRIMARY_MODEL_ID=Qwen/Qwen2.5-7B-Instruct-AWQ
-uvicorn app.main:app --reload --port 8000
-```
+FastAPI · Redis · Docker Compose · Prometheus · Grafana · GitHub Actions ·
+vLLM or Ollama (backend-agnostic)
 
-## Run tests (no GPU required)
-
-```bash
-pytest -v
-```
-
-## Full stack via Docker Compose (on a GPU box)
+## Quick start (no GPU required)
 
 ```bash
+git clone <repo-url> llm-gateway && cd llm-gateway
 docker compose up -d --build
+docker compose exec ollama ollama pull llama3.2:3b
+docker compose exec ollama-b ollama pull qwen2.5:1.5b
+
 curl http://localhost:8000/health
-```
-
-## Try it
-
-```bash
-# non-streaming
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-key" \
-  -d '{
-        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-        "messages": [{"role": "user", "content": "Say hi in 5 words."}],
-        "temperature": 0
-      }'
-
-# repeat the exact same request -> look for "X-Cache: HIT" in the response headers
-curl -i http://localhost:8000/v1/chat/completions ... # same payload
-
-# streaming
-curl -N http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen2.5-7B-Instruct-AWQ","messages":[{"role":"user","content":"count to 5"}],"stream":true}'
+  -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-## Load test
+Full step-by-step instructions, including local dev without Docker, proving
+fallback/rate-limiting under real conditions, load testing, and CI/CD setup:
+see **[RUNBOOK.md](./RUNBOOK.md)**.
 
-```bash
-pip install locust
-locust -f locustfile.py --host http://localhost:8000 \
-  --users 100 --spawn-rate 5 --run-time 5m --csv results/run1 --headless
+## Project layout
+
+```
+app/
+├── main.py               # FastAPI entrypoint, wiring, lifespan
+├── schemas.py             # OpenAI-compatible request/response models
+├── routing.py              # /v1/chat/completions: cache, retry, fallback, streaming
+├── cache.py                 # Redis exact-match cache
+├── rate_limit.py             # Redis rate limiter + usage tracking
+├── metrics.py                 # Prometheus metric definitions
+└── adapters/
+    ├── base.py                 # Abstract backend interface
+    └── vllm_adapter.py          # OpenAI-wire-format HTTP adapter (works for vLLM or Ollama)
+tests/test_routing.py       # Mocked-backend test suite (CI-safe, no GPU)
+docker/Dockerfile.gateway    # Multi-stage image for the gateway service
+docker-compose.yml            # Full stack: gateway + redis + 2 backends + prometheus + grafana
+grafana/                       # Auto-provisioned datasource + dashboard
+prometheus.yml                  # Scrape config
+locustfile.py                    # Load test
+.github/workflows/deploy.yml      # CI/CD pipeline
 ```
 
-## Observability
+## Swapping in a real GPU backend later
 
-- `/metrics` — Prometheus scrape target
-- Prometheus UI: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (default admin / admin, override with `GRAFANA_PASSWORD`)
-  - Add Prometheus (`http://prometheus:9090`) as a data source
-  - Panels: p50/p95/p99 latency (`histogram_quantile(0.95, rate(gateway_request_latency_seconds_bucket[5m]))`),
-    requests/sec (`rate(gateway_requests_total[1m])`), cache hit ratio, error rate
+The adapter (`app/adapters/vllm_adapter.py`) only assumes an OpenAI-compatible
+HTTP endpoint — it doesn't care whether that's vLLM or Ollama. To move from
+the CPU-friendly Ollama setup to real vLLM on a rented GPU:
 
-## CI/CD
+1. Swap the `ollama` / `ollama-b` services in `docker-compose.yml` for
+   `vllm/vllm-openai:latest`, with a GPU `deploy.resources.reservations` block.
+2. Point `VLLM_URL` / `VLLM_URL_B` at ports `8001` / `8002` instead of
+   Ollama's `11434`.
+3. Everything else — routing, caching, fallback, rate limiting, metrics — is
+   unchanged.
 
-`.github/workflows/deploy.yml` runs on every push to `main`:
-`test` (mocked backend, no GPU) → `build` (push image to GHCR) → `deploy` (SSH into the GPU box, `docker compose pull && up -d`) → `smoke` (curl `/health`).
+## License
 
-Required repo secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`.
-
-## Adding a second backend (Week 6)
-
-1. Instantiate a second `VLLMAdapter` in `app/main.py` pointed at `VLLM_URL_B`.
-2. It's auto-registered as the fallback for the primary model — `routing.py`
-   retries the primary once (via `tenacity`), then falls over automatically
-   and increments `gateway_fallback_total`.
+MIT (or your choice — update this section).
